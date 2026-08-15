@@ -1,0 +1,1 @@
+"""Lightweight project smoke tests."""
