@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -9,7 +10,7 @@ def profile_database(db_path: str | Path) -> dict:
     """Return tables, columns, row counts, declared FKs, and cautious inferred links."""
     tables: list[dict] = []
     relationships: list[dict] = []
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection:
         names = [row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )]

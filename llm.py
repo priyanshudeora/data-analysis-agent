@@ -1,56 +1,103 @@
-"""One sequential, retrying local-LLM access point for all graph nodes."""
+"""Lazy, retrying model access for OpenRouter hosting and local Ollama."""
 from __future__ import annotations
 
 import logging
 import os
 import time
+from functools import lru_cache
 from typing import Any
 
-from langchain_ollama import ChatOllama
-
 LOGGER = logging.getLogger(__name__)
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("INSIGHTPILOT_LLM_TIMEOUT", "90"))
-MAX_LLM_ATTEMPTS = int(os.getenv("INSIGHTPILOT_LLM_ATTEMPTS", "2"))
-
-# Keep contexts bounded for a 6 GB GPU. Set both models equal to run just one pull.
-coder_llm = ChatOllama(
-    model=os.getenv("INSIGHTPILOT_CODER_MODEL", "qwen2.5-coder:7b"),
-    temperature=0.2,
-    num_ctx=int(os.getenv("INSIGHTPILOT_NUM_CTX", "4096")),
-    timeout=OLLAMA_TIMEOUT_SECONDS,
-)
-reasoning_llm = ChatOllama(
-    model=os.getenv("INSIGHTPILOT_REASONING_MODEL", "qwen2.5-coder:7b"),
-    temperature=0.2,
-    num_ctx=int(os.getenv("INSIGHTPILOT_NUM_CTX", "4096")),
-    timeout=OLLAMA_TIMEOUT_SECONDS,
-)
 
 
-def invoke_llm(llm: ChatOllama, prompt: str) -> str:
-    """Invoke synchronously with bounded retries; LangGraph calls nodes sequentially."""
-    last_error: Exception | None = None
-    for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
+def provider() -> str:
+    return os.getenv("INSIGHTPILOT_LLM_PROVIDER", "ollama").strip().lower()
+
+
+def validate_configuration() -> None:
+    if provider() not in {"openrouter", "ollama"}:
+        raise ValueError("INSIGHTPILOT_LLM_PROVIDER must be openrouter or ollama.")
+    if provider() == "openrouter" and not os.getenv("OPENROUTER_API_KEY", "").strip():
+        raise ValueError("Add OPENROUTER_API_KEY in the app's deployment secrets, then restart the app.")
+    for name, default in (("INSIGHTPILOT_LLM_TIMEOUT", "90"), ("INSIGHTPILOT_LLM_ATTEMPTS", "2"),
+                          ("INSIGHTPILOT_MAX_TOKENS", "2048")):
         try:
-            response: Any = llm.invoke(prompt)
-            return str(response.content)
-        except Exception as exc:  # the Ollama HTTP client exposes several exception types
-            last_error = exc
-            LOGGER.warning("Local LLM attempt %s/%s failed: %s", attempt, MAX_LLM_ATTEMPTS, exc)
-            if attempt < MAX_LLM_ATTEMPTS:
-                time.sleep(1.0)
-    raise RuntimeError(f"Local LLM unavailable after {MAX_LLM_ATTEMPTS} attempts: {last_error}") from last_error
+            if int(os.getenv(name, default)) < 1:
+                raise ValueError
+        except ValueError:
+            raise ValueError(f"{name} must be a positive integer.") from None
+
+
+@lru_cache(maxsize=2)
+def _client(role: str) -> Any:
+    validate_configuration()
+    timeout = int(os.getenv("INSIGHTPILOT_LLM_TIMEOUT", "90"))
+    model_var = f"INSIGHTPILOT_{role.upper()}_MODEL"
+    if provider() == "openrouter":
+        from langchain_openrouter import ChatOpenRouter
+        from openrouter import OpenRouter
+
+        return ChatOpenRouter(
+            model=os.getenv(model_var, "openai/gpt-4.1-mini"),
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            temperature=0.2,
+            max_tokens=int(os.getenv("INSIGHTPILOT_MAX_TOKENS", "2048")),
+            timeout=timeout * 1000,  # OpenRouter's SDK uses milliseconds.
+            max_retries=0,
+            # Explicitly disable SDK defaults; max_retries=0 alone leaves them on.
+            client=OpenRouter(api_key=os.environ["OPENROUTER_API_KEY"],
+                              timeout_ms=timeout * 1000, retry_config=None),
+        )
+    from langchain_ollama import ChatOllama
+
+    return ChatOllama(
+        model=os.getenv(model_var, "qwen2.5-coder:7b"),
+        base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        temperature=0.2,
+        num_ctx=int(os.getenv("INSIGHTPILOT_NUM_CTX", "4096")),
+        client_kwargs={"timeout": timeout},
+    )
+
+
+class LazyModel:
+    """Keep imports and the setup screen usable before secrets are configured."""
+
+    def __init__(self, role: str):
+        self.role = role
+
+    def invoke(self, messages: Any) -> Any:
+        return _client(self.role).invoke(messages)
+
+    def bind_tools(self, tools: Any) -> Any:
+        return _client(self.role).bind_tools(tools)
+
+
+coder_llm = LazyModel("coder")
+reasoning_llm = LazyModel("reasoning")
 
 
 def invoke_message(llm: Any, messages: Any) -> Any:
-    """Retry a message/tool-call invocation without discarding tool-call metadata."""
+    attempts = max(1, int(os.getenv("INSIGHTPILOT_LLM_ATTEMPTS", "2")))
     last_error: Exception | None = None
-    for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             return llm.invoke(messages)
         except Exception as exc:
             last_error = exc
-            LOGGER.warning("Local tool-call attempt %s/%s failed: %s", attempt, MAX_LLM_ATTEMPTS, exc)
-            if attempt < MAX_LLM_ATTEMPTS:
+            # Provider exceptions can contain request data; never expose their payloads.
+            LOGGER.warning("Model call %s/%s failed (%s)", attempt, attempts, type(exc).__name__)
+            if attempt < attempts:
                 time.sleep(1.0)
-    raise RuntimeError(f"Local LLM unavailable after {MAX_LLM_ATTEMPTS} attempts: {last_error}") from last_error
+    kind = type(last_error).__name__
+    raise RuntimeError(
+        f"Model request failed after {attempts} attempts ({kind}). "
+        "Check the provider credentials, model availability, quota, and connection."
+    ) from None
+
+
+def invoke_llm(llm: Any, prompt: str) -> str:
+    content = invoke_message(llm, prompt).content
+    if isinstance(content, str):
+        return content
+    return "".join(block.get("text", "") for block in content
+                   if isinstance(block, dict) and block.get("type") == "text")

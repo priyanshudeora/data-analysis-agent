@@ -1,7 +1,6 @@
 """Streamlit presentation layer for a saved InsightPilot graph state."""
 from __future__ import annotations
 
-import json
 import hashlib
 import sys
 import io
@@ -10,6 +9,8 @@ import csv
 import re
 import sqlite3
 import time
+import os
+import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -24,9 +25,8 @@ if str(ROOT) not in sys.path:
 from db.setup_db import setup_database
 from db.schema_profile import profile_database
 from main import run
+from llm import provider, validate_configuration
 
-RESULT_PATH = Path(__file__).with_name("latest_run.json")
-UPLOAD_DIR = ROOT / "uploads"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 250 * 1024 * 1024
 OVERVIEW_QUESTION = (
@@ -35,10 +35,11 @@ OVERVIEW_QUESTION = (
 )
 
 
-def _json_default(value: Any) -> Any:
-    if hasattr(value, "to_plotly_json"):
-        return value.to_plotly_json()
-    return str(value)
+def session_directory() -> Path:
+    """Each browser session owns its files; cleaned up when its state is released."""
+    if "data_directory" not in st.session_state:
+        st.session_state["data_directory"] = tempfile.TemporaryDirectory(prefix="insightpilot-")
+    return Path(st.session_state["data_directory"].name)
 
 
 def save_uploaded_database(uploaded_file: Any) -> Path:
@@ -57,9 +58,8 @@ def save_uploaded_database(uploaded_file: Any) -> Path:
         return _csv_files_to_sqlite([(name, content)], hashlib.sha256(content).hexdigest()[:12])
     if not content.startswith(b"SQLite format 3\x00"):
         raise ValueError("Upload a valid SQLite database, CSV file, or ZIP containing CSV files.")
-    UPLOAD_DIR.mkdir(exist_ok=True)
     digest = hashlib.sha256(content).hexdigest()[:12]
-    destination = UPLOAD_DIR / f"{digest}-{name}"
+    destination = session_directory() / f"{digest}.db"
     destination.write_bytes(content)
     return destination
 
@@ -106,9 +106,8 @@ def _safe_identifier(value: str, fallback: str, used: set[str]) -> str:
 
 def _csv_files_to_sqlite(files: list[tuple[str, bytes]], digest: str) -> Path:
     """Import CSVs into a content-addressed SQLite DB; every CSV becomes one TEXT table."""
-    UPLOAD_DIR.mkdir(exist_ok=True)
-    destination = UPLOAD_DIR / f"{digest}-csv-import.db"
-    temporary = UPLOAD_DIR / f"{digest}-csv-import.tmp"
+    destination = session_directory() / f"{digest}-csv-import.db"
+    temporary = session_directory() / f"{digest}-csv-import.tmp"
     if temporary.exists():
         temporary.unlink()
     used_tables: set[str] = set()
@@ -165,6 +164,10 @@ def _csv_files_to_sqlite(files: list[tuple[str, bytes]], digest: str) -> Path:
 
 def render_analysis(state: dict, expanded: bool = False) -> None:
     st.write(state.get("final_summary", "No final summary generated."))
+    if any(result.get("truncated") for result in state.get("results", [])):
+        st.warning("Some query results were limited to 1,000 rows. Charts show only those rows.")
+    if any(len(result.get("rows", [])) > 50 for result in state.get("results", [])):
+        st.caption("Narrative findings use the first 50 rows of each query result; they may not describe the complete dataset.")
     with st.expander("Plan, SQL, and reasoning trail", expanded=expanded):
         for step in state.get("plan", []):
             st.markdown(f"**{step['id']}. {step['question']}** — {step['purpose']}")
@@ -220,6 +223,22 @@ st.set_page_config(page_title="InsightPilot", page_icon="✦", layout="wide")
 st.title("✦ InsightPilot")
 st.caption("Load data first; InsightPilot profiles it automatically, then opens an analysis chat.")
 
+# Root-level Streamlit secrets are exported as environment variables on access.
+try:
+    st.secrets.to_dict()
+except FileNotFoundError:
+    pass
+os.environ.setdefault("INSIGHTPILOT_LLM_PROVIDER", "openrouter")
+try:
+    validate_configuration()
+except ValueError as exc:
+    st.error(str(exc))
+    st.info("Configure deployment secrets using .streamlit/secrets.toml.example. For local Ollama, set INSIGHTPILOT_LLM_PROVIDER=ollama.")
+    st.stop()
+
+if provider() == "openrouter":
+    st.info("Cloud analysis uses OpenRouter. Your questions, database schema, result samples (up to 50 rows per query), and derived findings are sent to the model provider. Uploads are temporary and private to this browser session.")
+
 st.subheader("1. Load and profile your data")
 data_source = st.radio("Database source", ["Bundled tech-layoffs demo", "Upload my data"], horizontal=True)
 uploaded_db = None
@@ -232,13 +251,12 @@ if load_data:
         st.error("Upload a database, CSV, or ZIP file first.")
     else:
         try:
-            db_path = save_uploaded_database(uploaded_db) if uploaded_db else setup_database()
+            db_path = save_uploaded_database(uploaded_db) if uploaded_db else setup_database(session_directory() / "demo.db")
             with st.spinner("Inspecting schema, mapping connections, and generating the complete data overview..."):
                 profile = profile_database(db_path)
                 overview = run(OVERVIEW_QUESTION, str(db_path))
             st.session_state.update({"active_db_path": str(db_path), "schema_profile": profile,
                                      "overview_state": overview, "chat_runs": []})
-            RESULT_PATH.write_text(json.dumps(overview, indent=2, default=_json_default), encoding="utf-8")
             st.success(f"Loaded {Path(db_path).name}. The analysis chat is ready.")
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             st.error(f"Data loading could not run: {exc}")
@@ -263,8 +281,11 @@ if question := st.chat_input("Ask about this database, for example: Which indust
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
-        with st.spinner("Running the validated InsightPilot workflow..."):
-            answer = run(question, st.session_state["active_db_path"])
-        render_analysis(answer)
+        try:
+            with st.spinner("Running the validated InsightPilot workflow..."):
+                answer = run(question, st.session_state["active_db_path"])
+            render_analysis(answer)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            st.error("Analysis could not finish. Check the model configuration and retry.")
+            st.stop()
     st.session_state["chat_runs"].append({"question": question, "state": answer})
-    RESULT_PATH.write_text(json.dumps(answer, indent=2, default=_json_default), encoding="utf-8")

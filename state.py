@@ -23,6 +23,7 @@ class QueryResult(BaseModel):
     columns: list[str] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    truncated: bool = False
 
 
 class Finding(BaseModel):

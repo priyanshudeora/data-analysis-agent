@@ -1,5 +1,7 @@
 # InsightPilot
 
+**Cloud deployment with OpenRouter is supported.** See [DEPLOYMENT.md](DEPLOYMENT.md) for Streamlit Community Cloud setup and the secrets template. The dashboard defaults to OpenRouter; set `INSIGHTPILOT_LLM_PROVIDER=ollama` to use a local model. Cloud mode sends questions, schema, sampled results, and findings to the configured provider. The local-only descriptions below apply to Ollama mode.
+
 **InsightPilot** is an autonomous data-analyst agent built with **LangGraph**. Give it a natural-language business question and a SQLite database (or a CSV/ZIP upload), and it plans a small set of sub-questions, inspects the schema, writes and validates SQL, extracts evidence-based findings, and generates the right chart for each result — all running on a **local LLM** (via Ollama) so no data or query ever leaves the machine.
 
 The full reasoning trail — plan, generated SQL, validation retries, findings, and charts — is rendered in an interactive **Streamlit** dashboard.
@@ -123,7 +125,7 @@ python main.py "Which industries had the highest layoffs in 2023?" --dashboard
 streamlit run dashboard/app.py
 ```
 
-Every run writes its full state to `dashboard/latest_run.json`, which the dashboard reads to render the question, plan, SQL, results, charts, findings, and diagnostics.
+CLI runs write their state to `dashboard/latest_run.json`. The dashboard runs analyses independently and keeps each visitor's results in their own session.
 
 ---
 
@@ -133,7 +135,7 @@ Every run writes its full state to `dashboard/latest_run.json`, which the dashbo
 2. **Automatic overview** — as soon as data loads, InsightPilot profiles the schema (tables, columns, inferred relationships) and runs one full analysis pass to give you a starting overview.
 3. **Ask follow-up questions** — the chat box at the bottom runs the complete plan → SQL → validate → insight → chart pipeline against the loaded database for any question you type.
 
-Uploaded databases are stored locally under `uploads/` and excluded from Git via `.gitignore`.
+Dashboard uploads and demo databases are stored in separate temporary directories per session. They are not durable across restarts.
 
 ### Example questions
 
