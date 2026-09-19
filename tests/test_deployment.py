@@ -95,12 +95,17 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(app.error)
             self.assertTrue(app.button(key="load_data").disabled)
             self.assertEqual(app.text_input(key="openrouter_api_key").value, "")
+            self.assertEqual(len(app.chat_input), 1)
+            self.assertTrue(app.chat_input(key="chat_prompt").disabled)
+            self.assertIn("Add your OpenRouter API key", app.chat_input(key="chat_prompt").placeholder)
 
     def test_apply_and_remove_key(self):
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "owner-key"}), patch("llm._openrouter_client") as client:
             app = self.new_app()
             self.configure(app, "visitor-key")
             self.assertFalse(app.button(key="load_data").disabled)
+            self.assertTrue(app.chat_input(key="chat_prompt").disabled)
+            self.assertIn("Load a dataset", app.chat_input(key="chat_prompt").placeholder)
             self.assertEqual(app.session_state["model_settings"].api_key, "visitor-key")
             self.assertEqual(app.session_state["model_settings"].model, "openrouter/free")
             self.assertEqual(app.text_input(key="openrouter_api_key").value, "")
@@ -132,6 +137,7 @@ class DashboardTests(unittest.TestCase):
                     app.button(key="load_data").click().run()
                     self.assertFalse(app.exception)
                     self.assertFalse(app.error)
+                    self.assertFalse(app.chat_input(key="chat_prompt").disabled)
                     self.assertEqual(run.call_args.kwargs["model_settings"].api_key, f"visitor-{index}")
                 self.assertNotEqual(apps[0].session_state["active_db_path"], apps[1].session_state["active_db_path"])
                 apps[0].button(key="remove_api_key").click().run()

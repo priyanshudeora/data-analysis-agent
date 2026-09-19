@@ -243,6 +243,7 @@ def render_schema(profile: dict) -> None:
 
 
 st.set_page_config(page_title="InsightPilot", page_icon="✦", layout="wide")
+st.session_state.setdefault("chat_runs", [])
 st.title("✦ InsightPilot")
 st.caption("Load data first; InsightPilot profiles it automatically, then opens an analysis chat.")
 
@@ -311,28 +312,40 @@ if load_data:
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             st.error(f"Data loading could not run: {exc}")
 
-if "active_db_path" not in st.session_state:
-    st.info("Choose your data source and click **Load data and generate overview**. The chat unlocks after profiling finishes.")
-    st.stop()
-
-render_schema(st.session_state["schema_profile"])
-st.subheader("Automatic data overview")
-render_analysis(st.session_state["overview_state"], expanded=False)
+data_ready = "active_db_path" in st.session_state
+if data_ready:
+    render_schema(st.session_state["schema_profile"])
+    st.subheader("Automatic data overview")
+    render_analysis(st.session_state["overview_state"], expanded=False)
+else:
+    st.info("Choose your data source and click **Load data and generate overview**. You can see the chat below; it becomes available after data is loaded.")
 
 st.subheader("2. Ask InsightPilot")
-st.caption("Ask follow-up questions about the loaded database. Each question runs the full validated analysis workflow.")
-for item in st.session_state["chat_runs"]:
+if not model_ready:
+    st.info("Add your OpenRouter API key above to enable chat.")
+elif not data_ready:
+    st.info("Load and profile a dataset above to enable chat.")
+else:
+    st.caption("Ask follow-up questions about the loaded database. Each question runs the full validated analysis workflow.")
+
+for item in st.session_state.get("chat_runs", []):
     with st.chat_message("user"):
         st.write(item["question"])
     with st.chat_message("assistant"):
         render_analysis(item["state"])
 
-if question := st.chat_input("Ask about this database, for example: Which industry had the highest layoffs?", disabled=not model_ready):
-    if not model_ready:
-        st.error("Add your own API key before starting an analysis.")
-        st.stop()
+chat_disabled = not (model_ready and data_ready)
+if not model_ready:
+    chat_placeholder = "Add your OpenRouter API key to start chatting"
+elif not data_ready:
+    chat_placeholder = "Load a dataset to start chatting"
+else:
+    chat_placeholder = "Ask about this database, for example: Which industry had the highest layoffs?"
+
+if question := st.chat_input(chat_placeholder, disabled=chat_disabled, key="chat_prompt", submit_mode="disable"):
     with st.chat_message("user"):
         st.write(question)
+    answer = None
     with st.chat_message("assistant"):
         try:
             with st.spinner("Running the validated InsightPilot workflow..."):
@@ -340,5 +353,5 @@ if question := st.chat_input("Ask about this database, for example: Which indust
             render_analysis(answer)
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             st.error("Analysis could not finish. Check the model configuration and retry.")
-            st.stop()
-    st.session_state["chat_runs"].append({"question": question, "state": answer})
+    if answer is not None:
+        st.session_state["chat_runs"].append({"question": question, "state": answer})
