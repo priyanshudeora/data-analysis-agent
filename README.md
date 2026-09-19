@@ -1,6 +1,6 @@
 # InsightPilot
 
-**Cloud deployment with OpenRouter is supported.** See [DEPLOYMENT.md](DEPLOYMENT.md) for Streamlit Community Cloud setup and the secrets template. The dashboard defaults to OpenRouter; set `INSIGHTPILOT_LLM_PROVIDER=ollama` to use a local model. Cloud mode sends questions, schema, sampled results, and findings to the configured provider. The local-only descriptions below apply to Ollama mode.
+**Cloud deployment with OpenRouter is supported.** Visitors paste their own API key into **Your model**, choose free models or a custom model ID, and click **Use my key**. No owner API key is needed, and the dashboard never uses an owner's credits. Keys stay in session memory and can be cleared with **Remove my key**. Free models have rate limits; paid models charge the visitor's account. See [DEPLOYMENT.md](DEPLOYMENT.md) for hosting instructions. Set `INSIGHTPILOT_LLM_PROVIDER=ollama` to use a local model. Cloud mode sends questions, schema, sampled results, and findings to the configured provider. The local-only descriptions below apply to Ollama mode.
 
 **InsightPilot** is an autonomous data-analyst agent built with **LangGraph**. Give it a natural-language business question and a SQLite database (or a CSV/ZIP upload), and it plans a small set of sub-questions, inspects the schema, writes and validates SQL, extracts evidence-based findings, and generates the right chart for each result — all running on a **local LLM** (via Ollama) so no data or query ever leaves the machine.
 

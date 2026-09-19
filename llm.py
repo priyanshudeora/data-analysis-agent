@@ -3,11 +3,73 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OpenRouterSettings:
+    """Private run configuration, never part of graph state or serialized results."""
+
+    api_key: str = field(repr=False)
+    model: str = "openrouter/free"
+
+    def __post_init__(self):
+        object.__setattr__(self, "api_key", self.api_key.strip())
+        object.__setattr__(self, "model", self.model.strip())
+        if not self.api_key:
+            raise ValueError("Enter your OpenRouter API key.")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.:/-]+", self.model):
+            raise ValueError("Enter an OpenRouter model ID, such as openrouter/free or provider/model-name.")
+
+
+@dataclass
+class _RunModels:
+    settings: OpenRouterSettings
+    stack: ExitStack = field(default_factory=ExitStack, repr=False)
+    client: Any = field(default=None, repr=False)
+    failure: str | None = None
+
+
+_active_models: ContextVar[_RunModels | None] = ContextVar("insightpilot_models", default=None)
+
+
+@contextmanager
+def model_session(settings: OpenRouterSettings | None):
+    """ContextVars propagate through LangGraph workers without global credentials."""
+    if settings is None:
+        yield
+        return
+    active = _RunModels(settings)
+    token = _active_models.set(active)
+    try:
+        yield
+    finally:
+        _active_models.reset(token)
+        active.stack.close()
+        active.client = None
+
+
+def _openrouter_client(api_key: str, model: str, stack: ExitStack | None = None) -> Any:
+    from langchain_openrouter import ChatOpenRouter
+    from openrouter import OpenRouter
+
+    timeout = int(os.getenv("INSIGHTPILOT_LLM_TIMEOUT", "90"))
+    sdk = OpenRouter(api_key=api_key, timeout_ms=timeout * 1000, retry_config=None)
+    if stack is not None:
+        sdk = stack.enter_context(sdk)
+    return ChatOpenRouter(
+        model=model, api_key=api_key, temperature=0.2,
+        max_tokens=int(os.getenv("INSIGHTPILOT_MAX_TOKENS", "2048")),
+        timeout=timeout * 1000, max_retries=0, client=sdk,
+    )
 
 
 def provider() -> str:
@@ -29,25 +91,12 @@ def validate_configuration() -> None:
 
 
 @lru_cache(maxsize=2)
-def _client(role: str) -> Any:
+def _default_client(role: str) -> Any:
     validate_configuration()
     timeout = int(os.getenv("INSIGHTPILOT_LLM_TIMEOUT", "90"))
     model_var = f"INSIGHTPILOT_{role.upper()}_MODEL"
     if provider() == "openrouter":
-        from langchain_openrouter import ChatOpenRouter
-        from openrouter import OpenRouter
-
-        return ChatOpenRouter(
-            model=os.getenv(model_var, "openai/gpt-4.1-mini"),
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            temperature=0.2,
-            max_tokens=int(os.getenv("INSIGHTPILOT_MAX_TOKENS", "2048")),
-            timeout=timeout * 1000,  # OpenRouter's SDK uses milliseconds.
-            max_retries=0,
-            # Explicitly disable SDK defaults; max_retries=0 alone leaves them on.
-            client=OpenRouter(api_key=os.environ["OPENROUTER_API_KEY"],
-                              timeout_ms=timeout * 1000, retry_config=None),
-        )
+        return _openrouter_client(os.environ["OPENROUTER_API_KEY"], os.getenv(model_var, "openai/gpt-4.1-mini"))
     from langchain_ollama import ChatOllama
 
     return ChatOllama(
@@ -57,6 +106,15 @@ def _client(role: str) -> Any:
         num_ctx=int(os.getenv("INSIGHTPILOT_NUM_CTX", "4096")),
         client_kwargs={"timeout": timeout},
     )
+
+
+def _client(role: str) -> Any:
+    active = _active_models.get()
+    if active is None:
+        return _default_client(role)
+    if active.client is None:
+        active.client = _openrouter_client(active.settings.api_key, active.settings.model, active.stack)
+    return active.client
 
 
 class LazyModel:
@@ -77,6 +135,9 @@ reasoning_llm = LazyModel("reasoning")
 
 
 def invoke_message(llm: Any, messages: Any) -> Any:
+    active = _active_models.get()
+    if active is not None and active.failure:
+        raise RuntimeError(active.failure)
     attempts = max(1, int(os.getenv("INSIGHTPILOT_LLM_ATTEMPTS", "2")))
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -86,6 +147,19 @@ def invoke_message(llm: Any, messages: Any) -> Any:
             last_error = exc
             # Provider exceptions can contain request data; never expose their payloads.
             LOGGER.warning("Model call %s/%s failed (%s)", attempt, attempts, type(exc).__name__)
+            status = getattr(exc, "status_code", None)
+            permanent = {
+                400: "The model rejected this request. Choose a model with tool-calling support.",
+                401: "Your OpenRouter key was rejected. Replace it in Your model.",
+                402: "Your OpenRouter account has insufficient credits. Choose the free model option or add credits.",
+                403: "Your OpenRouter key does not have access to this model.",
+                404: "This OpenRouter model is unavailable. Choose another model.",
+                429: "OpenRouter's rate limit was reached. Wait before starting another analysis.",
+            }.get(status)
+            if permanent:
+                if active is not None:
+                    active.failure = permanent
+                raise RuntimeError(permanent) from None
             if attempt < attempts:
                 time.sleep(1.0)
     kind = type(last_error).__name__

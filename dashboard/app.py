@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 from db.setup_db import setup_database
 from db.schema_profile import profile_database
 from main import run
-from llm import provider, validate_configuration
+from llm import OpenRouterSettings, validate_configuration
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 250 * 1024 * 1024
@@ -33,6 +33,29 @@ OVERVIEW_QUESTION = (
     "Provide a comprehensive overview of this database: identify the main entities, "
     "record distributions, meaningful trends, notable outliers, and the most useful starting insights."
 )
+
+
+def apply_model_settings() -> None:
+    """Callback: update only this session; never put visitor keys in os.environ."""
+    previous = st.session_state.get("model_settings")
+    key = st.session_state.get("openrouter_api_key", "").strip()
+    if not key and previous:
+        key = previous.api_key
+    model = ("openrouter/free" if st.session_state.get("model_choice") == "Free models"
+             else st.session_state.get("custom_model", ""))
+    try:
+        st.session_state["model_settings"] = OpenRouterSettings(api_key=key, model=model)
+        st.session_state.pop("model_error", None)
+        st.session_state["openrouter_api_key"] = ""
+    except ValueError as exc:
+        st.session_state.pop("model_settings", None)
+        st.session_state["model_error"] = str(exc)
+
+
+def remove_api_key() -> None:
+    st.session_state.pop("model_settings", None)
+    st.session_state.pop("model_error", None)
+    st.session_state["openrouter_api_key"] = ""
 
 
 def session_directory() -> Path:
@@ -228,25 +251,52 @@ try:
     st.secrets.to_dict()
 except FileNotFoundError:
     pass
-os.environ.setdefault("INSIGHTPILOT_LLM_PROVIDER", "openrouter")
-try:
-    validate_configuration()
-except ValueError as exc:
-    st.error(str(exc))
-    st.info("Configure deployment secrets using .streamlit/secrets.toml.example. For local Ollama, set INSIGHTPILOT_LLM_PROVIDER=ollama.")
-    st.stop()
-
-if provider() == "openrouter":
-    st.info("Cloud analysis uses OpenRouter. Your questions, database schema, result samples (up to 50 rows per query), and derived findings are sent to the model provider. Uploads are temporary and private to this browser session.")
+dashboard_provider = os.getenv("INSIGHTPILOT_LLM_PROVIDER", "openrouter").strip().lower()
+model_settings = None
+if dashboard_provider == "ollama":
+    try:
+        validate_configuration()
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
+    model_ready = True
+    st.caption("Using the local Ollama model configured by the app owner.")
+else:
+    st.subheader("Your model")
+    st.caption("Use your own OpenRouter key. All model usage belongs to your account; the app owner's credits are never used.")
+    st.selectbox("Model option", ["Free models", "Custom model"], key="model_choice")
+    with st.form("model_credentials"):
+        st.text_input("OpenRouter API key", type="password", key="openrouter_api_key",
+                      placeholder="Paste your key, or leave blank to keep your current key")
+        if st.session_state["model_choice"] == "Custom model":
+            st.text_input("OpenRouter model ID", key="custom_model", placeholder="provider/model-name")
+            st.caption("Choose a model with tool-calling support. Paid models charge your OpenRouter account.")
+        else:
+            st.caption("Uses openrouter/free. Free models have rate limits and availability can vary.")
+        st.form_submit_button("Use my key", on_click=apply_model_settings, type="primary")
+    if st.session_state.get("model_error"):
+        st.error(st.session_state["model_error"])
+    model_settings = st.session_state.get("model_settings")
+    model_ready = model_settings is not None
+    if model_ready:
+        st.success(f"Ready to use {model_settings.model}. Your key is checked when you start an analysis.")
+        st.button("Remove my key", key="remove_api_key", on_click=remove_api_key)
+    else:
+        st.info("Add your API key above to start an analysis.")
+    st.caption("Your key is held in this browser session's server memory, never saved to a file. Remove it when finished. Questions, schema, result samples, and findings are sent through OpenRouter to the model provider.")
+    st.markdown("[Get an OpenRouter key](https://openrouter.ai/settings/keys) · [Free model details](https://openrouter.ai/openrouter/free)")
 
 st.subheader("1. Load and profile your data")
 data_source = st.radio("Database source", ["Bundled tech-layoffs demo", "Upload my data"], horizontal=True)
 uploaded_db = None
 if data_source == "Upload my data":
     uploaded_db = st.file_uploader("SQLite database, CSV, or ZIP", type=["db", "sqlite", "sqlite3", "csv", "zip"])
-load_data = st.button("Load data and generate overview", type="primary", width="stretch")
+load_data = st.button("Load data and generate overview", type="primary", width="stretch", key="load_data", disabled=not model_ready)
 
 if load_data:
+    if not model_ready:
+        st.error("Add your own API key before starting an analysis.")
+        st.stop()
     if data_source == "Upload my data" and not uploaded_db:
         st.error("Upload a database, CSV, or ZIP file first.")
     else:
@@ -254,7 +304,7 @@ if load_data:
             db_path = save_uploaded_database(uploaded_db) if uploaded_db else setup_database(session_directory() / "demo.db")
             with st.spinner("Inspecting schema, mapping connections, and generating the complete data overview..."):
                 profile = profile_database(db_path)
-                overview = run(OVERVIEW_QUESTION, str(db_path))
+                overview = run(OVERVIEW_QUESTION, str(db_path), model_settings=model_settings)
             st.session_state.update({"active_db_path": str(db_path), "schema_profile": profile,
                                      "overview_state": overview, "chat_runs": []})
             st.success(f"Loaded {Path(db_path).name}. The analysis chat is ready.")
@@ -277,13 +327,16 @@ for item in st.session_state["chat_runs"]:
     with st.chat_message("assistant"):
         render_analysis(item["state"])
 
-if question := st.chat_input("Ask about this database, for example: Which industry had the highest layoffs?"):
+if question := st.chat_input("Ask about this database, for example: Which industry had the highest layoffs?", disabled=not model_ready):
+    if not model_ready:
+        st.error("Add your own API key before starting an analysis.")
+        st.stop()
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
         try:
             with st.spinner("Running the validated InsightPilot workflow..."):
-                answer = run(question, st.session_state["active_db_path"])
+                answer = run(question, st.session_state["active_db_path"], model_settings=model_settings)
             render_analysis(answer)
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             st.error("Analysis could not finish. Check the model configuration and retry.")

@@ -10,12 +10,14 @@ from typing import Any
 
 from db.setup_db import DB_PATH, setup_database
 from graph import insight_graph
+from llm import OpenRouterSettings, model_session
 
 
-def run(question: str, db_path: str | None = None) -> dict:
+def run(question: str, db_path: str | None = None, *, model_settings: OpenRouterSettings | None = None) -> dict:
     path = Path(db_path) if db_path else setup_database()
     initial_state = {"question": question, "db_path": str(path), "queries": [], "results": [], "insights": [], "chart_specs": [], "errors": []}
-    return dict(insight_graph.invoke(initial_state, config={"recursion_limit": 64}))
+    with model_session(model_settings):
+        return dict(insight_graph.invoke(initial_state, config={"recursion_limit": 64}))
 
 
 def _json_default(value: Any) -> Any:
