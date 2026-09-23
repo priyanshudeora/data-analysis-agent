@@ -288,11 +288,23 @@ else:
     st.markdown("[Get an OpenRouter key](https://openrouter.ai/settings/keys) · [Free model details](https://openrouter.ai/openrouter/free)")
 
 st.subheader("1. Load and profile your data")
-data_source = st.radio("Database source", ["Bundled tech-layoffs demo", "Upload my data"], horizontal=True)
+data_source = st.segmented_control(
+    "Database source",
+    ["Upload my data", "Bundled tech-layoffs demo"],
+    default="Upload my data",
+    key="data_source",
+)
 uploaded_db = None
 if data_source == "Upload my data":
     uploaded_db = st.file_uploader("SQLite database, CSV, or ZIP", type=["db", "sqlite", "sqlite3", "csv", "zip"])
-load_data = st.button("Load data and generate overview", type="primary", width="stretch", key="load_data", disabled=not model_ready)
+upload_missing = data_source == "Upload my data" and uploaded_db is None
+load_data = st.button(
+    "Load data and generate overview",
+    type="primary",
+    width="stretch",
+    key="load_data",
+    disabled=not model_ready or upload_missing,
+)
 
 if load_data:
     if not model_ready:
