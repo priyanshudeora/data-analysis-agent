@@ -1,181 +1,218 @@
 # InsightPilot
 
-**Cloud deployment with OpenRouter is supported.** Visitors paste their own API key into **Your model**, choose free models or a custom model ID, and click **Use my key**. No owner API key is needed, and the dashboard never uses an owner's credits. Keys stay in session memory and can be cleared with **Remove my key**. Free models have rate limits; paid models charge the visitor's account. See [DEPLOYMENT.md](DEPLOYMENT.md) for hosting instructions. Set `INSIGHTPILOT_LLM_PROVIDER=ollama` to use a local model. Cloud mode sends questions, schema, sampled results, and findings to the configured provider. The local-only descriptions below apply to Ollama mode.
+InsightPilot is a LangGraph-based data-analysis agent for SQLite and CSV data. It profiles an uploaded dataset, plans analytical questions, generates and validates read-only SQL, extracts findings from the returned rows, and renders Plotly charts in a Streamlit dashboard.
 
-**InsightPilot** is an autonomous data-analyst agent built with **LangGraph**. Give it a natural-language business question and a SQLite database (or a CSV/ZIP upload), and it plans a small set of sub-questions, inspects the schema, writes and validates SQL, extracts evidence-based findings, and generates the right chart for each result — all running on a **local LLM** (via Ollama) so no data or query ever leaves the machine.
+**Live app:** [insightpilot-data-analyst.streamlit.app](https://insightpilot-data-analyst.streamlit.app/)
 
-The full reasoning trail — plan, generated SQL, validation retries, findings, and charts — is rendered in an interactive **Streamlit** dashboard.
+The hosted dashboard uses a bring-your-own-key model. Each visitor enters an OpenRouter API key in their own Streamlit session and can choose `openrouter/free` or a custom tool-capable model. The app does not use an owner API key or include a preloaded dataset.
 
----
+## What the app does
 
-## Why this project
+- Accepts `.db`, `.sqlite`, `.sqlite3`, `.csv`, and `.zip` uploads.
+- Converts CSV files into a temporary SQLite database, with one table per CSV.
+- Profiles tables, columns, row counts, declared foreign keys, and inferred relationships.
+- Breaks a business question into two to four focused analysis steps.
+- Generates SQLite `SELECT` or `WITH` queries grounded in the inspected schema.
+- Executes queries through a read-only connection with a timeout and row limit.
+- Retries invalid or unhelpful queries with validator feedback.
+- Produces evidence-bound findings and Plotly charts.
+- Keeps follow-up analysis in a visible Streamlit chat interface.
 
-Most "text-to-SQL" demos stop at generating a single query. InsightPilot instead models the full analyst workflow as an explicit, inspectable state graph:
-
-- **Multi-step planning** — one question is decomposed into 2–4 independently answerable sub-questions before any SQL is written.
-- **Schema-grounded generation** — the SQL generator only ever sees the real, dynamically-inspected schema, never a hardcoded one.
-- **Self-correction loop** — every query is executed and validated; failures (SQL errors, empty results, suspicious aggregates) feed back into the next generation attempt, up to 3 retries per step.
-- **Evidence-bound insights** — the insight-extraction step is instructed to reason only from the actual returned rows, not to invent numbers.
-- **Tool-bound charting** — the model never outputs chart data or code. It calls one of four strict LangChain tools with column names only; the tool itself builds the Plotly figure from the real query-result DataFrame. This removes an entire class of hallucinated-chart bugs.
-
----
-
-## Architecture
+## Analysis workflow
 
 ```mermaid
 flowchart LR
-  A([START]) --> P[Planner] --> S[Schema Inspector] --> G[Query Generator]
-  G --> E[Query Executor] --> V{Validator}
-  V -- retry, up to 3x --> G
-  V -- next step --> G
-  V -- all steps done --> I[Insight Extractor] --> C[Chart Selector] --> Z([END])
-  C -. bound tool calls .-> T[Validated Plotly Tools]
+    U[Upload SQLite, CSV, or ZIP] --> P[Profile database]
+    P --> Q[User question]
+    Q --> A[Planner]
+    A --> S[Schema inspector]
+    S --> G[Query generator]
+    G --> E[Read-only query executor]
+    E --> V{Query validator}
+    V -->|Retry with feedback| G
+    V -->|Next step| G
+    V -->|All steps complete| I[Insight extractor]
+    I --> C[Chart selector]
+    C --> R[Summary, SQL, findings, and charts]
 ```
 
-| Node | Responsibility |
-|---|---|
-| **Planner** | Breaks the user's question into 2–4 concrete, independently-queryable sub-questions (LLM, JSON-structured output via Pydantic). Falls back to a generic 2-step plan if the local model is unavailable. |
-| **Schema Inspector** | Reads table/column metadata directly from SQLite (via `PRAGMA table_info`, wrapped by LangChain's `SQLDatabase` toolkit). Sample rows are never included — only structure. |
-| **Query Generator** | Writes one SQLite `SELECT`/`WITH` query per step, grounded in the real schema and any prior validation feedback. Rejects anything that isn't a single read-only statement before it reaches the database. |
-| **Query Executor** | Runs the query against SQLite and captures columns, rows, or an error — nothing else touches the database. |
-| **Query Validator** | Flags SQL errors, empty result sets, and suspicious negative aggregates. Routes back to the generator (with feedback) or forward, up to `MAX_QUERY_RETRIES`. |
-| **Insight Extractor** | Turns each validated result set into short, evidence-based findings plus a one-line summary — explicitly instructed not to invent values. |
-| **Chart Selector** | Binds a reasoning LLM to four Plotly tools (`make_bar_chart`, `make_line_chart`, `make_pie_chart`, `make_scatter_chart`). The model picks a tool and real column names only; the tool renders the actual figure from the query-result DataFrame. Falls back to a plain table if no valid chart can be built. |
+The graph is assembled in `graph.py`. State moves between nodes through the `AgentState` types in `state.py`, while Pydantic models validate plans, queries, results, insights, and chart specifications.
 
-State is passed between nodes as a single `AgentState` (TypedDict), with Pydantic models (`PlanStep`, `SQLQuery`, `QueryResult`, `Insight`, `ChartSpec`, etc.) used to validate the shape of each node's output before it's merged back in.
+## Model modes
 
----
+### Hosted dashboard: visitor-supplied OpenRouter key
 
-## Safety and design choices
+The Streamlit dashboard defaults to OpenRouter mode. A visitor:
 
-- **SQL is constrained, not trusted.** Generated SQL must start with `SELECT`/`WITH`, contain no semicolons, and is rejected outright otherwise — before it ever reaches SQLite.
-- **The LLM never touches raw chart data.** Chart generation is entirely tool-bound: the model can only choose a chart type and column names, never emit values, code, or a spec object. This is the single most important safety property of the pipeline.
-- **Everything runs locally.** LLM calls go through Ollama (`qwen2.5-coder:7b` by default) — no external API calls, so it's safe to point at real/sensitive datasets.
-- **Bounded retries everywhere.** LLM calls (`llm.py`) retry with backoff on transient failures; SQL generation retries on validation feedback up to `MAX_QUERY_RETRIES` (default 3) per step — the graph can't loop forever.
-- **Errors are data, not exceptions.** Failures at any stage are captured into `state["errors"]` and surfaced in the dashboard's Diagnostics panel rather than crashing the run.
+1. Pastes an OpenRouter API key under **Your model**.
+2. Selects the free router or supplies a custom model ID.
+3. Uploads a supported data file.
+4. Starts the automatic overview and uses the chat for follow-up questions.
 
----
+The key is stored only in that Streamlit session's server memory. It is not written to a file, environment variable, graph state, or saved result. Questions, schema information, sampled query results, and findings are sent to OpenRouter and the selected model provider.
+
+### Local CLI: Ollama or OpenRouter
+
+The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reasoning roles. It can also use an environment-configured OpenRouter key.
 
 ## Project structure
 
-```
-├── main.py                  # CLI entrypoint — runs the graph, writes dashboard/latest_run.json
-├── graph.py                 # StateGraph assembly (nodes + edges + conditional routing)
-├── state.py                 # AgentState TypedDict + Pydantic models shared across nodes
-├── llm.py                   # Ollama client setup, retry wrapper for LLM calls
-├── prompts.py                # All node prompts in one place
-├── nodes/
-│   ├── planner.py            # Question → 2-4 step plan
-│   ├── schema_inspector.py   # Dynamic schema discovery
-│   ├── query_generator.py    # Step → validated SQLite SELECT/WITH
-│   ├── query_executor.py     # Executes SQL, captures rows/errors
-│   ├── query_validator.py    # Validates results, drives the retry loop
-│   ├── insight_extractor.py  # Result rows → evidence-based findings
-│   ├── chart_selector.py     # Tool-bound chart type + column selection
-│   └── utils.py               # JSON parsing / state helpers shared by nodes
-├── tools/
-│   └── chart_tools.py         # The 4 strict Plotly chart tools + ContextVar-scoped data binding
-├── db/
-│   ├── setup_db.py            # Builds a local CLI/test fixture from sample_data.csv
-│   ├── schema_profile.py      # Table/relationship profiling for the dashboard's schema view
-│   └── sample_data.csv        # Local CLI/test fixture; excluded from the Docker image
+```text
+.
 ├── dashboard/
-│   └── app.py                  # Streamlit UI: upload data, view schema, chat with InsightPilot
+│   └── app.py                    # Streamlit upload, schema, overview, and chat UI
+├── db/
+│   ├── schema_profile.py         # Dashboard schema and relationship profiling
+│   ├── setup_db.py               # Builds the local CLI/test fixture database
+│   └── sample_data.csv           # Local CLI/test fixture; excluded from Docker
+├── nodes/
+│   ├── planner.py                # Question → analysis plan
+│   ├── schema_inspector.py       # SQLite schema inspection for the graph
+│   ├── query_generator.py        # Plan step → SQLite query
+│   ├── query_executor.py         # Bounded read-only query execution
+│   ├── query_validator.py        # Result validation and retry routing
+│   ├── insight_extractor.py      # Query results → findings and summary
+│   ├── chart_selector.py         # Tool-bound chart selection
+│   └── utils.py                  # Shared node helpers
+├── tools/
+│   └── chart_tools.py            # Bar, line, pie, and scatter Plotly tools
 ├── tests/
-│   ├── smoke_nodes.py           # Non-LLM node tests
-│   └── smoke_llm_nodes.py       # Node logic tests with mocked LLM responses (no Ollama needed)
-└── requirements.txt
+│   ├── test_deployment.py        # Dashboard, credentials, and query-boundary tests
+│   ├── smoke_nodes.py            # Non-LLM graph-node smoke tests
+│   └── smoke_llm_nodes.py        # Mocked-LLM node smoke tests
+├── .github/workflows/
+│   └── aws-deploy.yml            # Test, Docker build, ECR push, and EC2 deployment
+├── .streamlit/
+│   ├── config.toml               # Upload and Streamlit runtime settings
+│   └── secrets.toml.example      # Optional deployment configuration example
+├── infra/
+│   └── aws-ec2.yaml              # CloudFormation for ECR, EC2, ALB, IAM, and SSM
+├── graph.py                       # LangGraph topology
+├── state.py                       # Shared TypedDict and Pydantic state models
+├── prompts.py                     # LLM prompts
+├── llm.py                         # OpenRouter/Ollama clients and retry handling
+├── main.py                        # Python API and CLI entrypoint
+├── Dockerfile                     # Non-root production container
+├── compose.yaml                   # Local container runtime
+├── requirements.txt               # Python dependencies
+└── DEPLOYMENT.md                  # Complete AWS deployment procedure
 ```
 
----
+## Run the dashboard locally
 
-## Setup
-
-**1. Install Python 3.10+ and create a virtual environment**
+Python 3.10 or newer is required. CI and the production image use Python 3.13.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-```
-
-**2. Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**3. Install Ollama and pull the default local model**
-
-```bash
-ollama pull qwen2.5-coder:7b
-```
-
-
-**4. Run an analysis**
-
-```bash
-python main.py "Which industries had the highest layoffs in 2023?"
-```
-
-**5. Or launch the full dashboard**
-
-```bash
-python main.py "Which industries had the highest layoffs in 2023?" --dashboard
-# or directly:
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 streamlit run dashboard/app.py
 ```
 
-CLI runs write their state to `dashboard/latest_run.json`. The dashboard runs analyses independently and keeps each visitor's results in their own session.
+On Windows PowerShell, activate the environment with:
 
----
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
-## Using the dashboard
+Open `http://localhost:8501`, enter your OpenRouter key in the UI, and upload a database or CSV file. No local secrets file is required for the default dashboard mode.
 
-1. **Load data** — upload your own `.db` / `.sqlite` / `.sqlite3` file, a `.csv`, or a `.zip` containing exactly one SQLite database or one-or-more UTF-8 CSV files. CSV uploads are converted into a temporary SQLite database (one table per file, safely-sanitized table/column names). Uploads are checked for valid SQLite headers, unsafe archive paths, too many files, and oversized archives before anything is written to disk.
-2. **Automatic overview** — as soon as data loads, InsightPilot profiles the schema (tables, columns, inferred relationships) and runs one full analysis pass to give you a starting overview.
-3. **Ask follow-up questions** — the chat box at the bottom runs the complete plan → SQL → validate → insight → chart pipeline against the loaded database for any question you type.
+## Run with Docker
 
-Dashboard uploads are stored in separate temporary directories per session. They are not durable across restarts. The Docker image contains no bundled dataset.
+```bash
+docker compose up --build
+```
 
-### Example questions
+Open `http://localhost:8501`. The container runs as a non-root user with a read-only root filesystem, dropped Linux capabilities, and a size-limited temporary filesystem for session uploads.
 
-- *"Which industries had the highest layoffs in 2023?"* → ranked totals + distribution chart
-- *"How did layoffs trend month by month in 2023?"* → monthly time series with peak call-outs
-- *"Which regions and industries combine the highest layoffs with the most funding raised?"* → comparison table or scatter plot
+Stop the service with:
 
----
+```bash
+docker compose down
+```
+
+The Docker build context excludes `db/sample_data.csv`, local secrets, virtual environments, generated databases, tests, and development artifacts.
+
+## Run the CLI
+
+### Ollama
+
+Install Ollama, pull the default model, and run a question:
+
+```bash
+ollama pull qwen2.5-coder:7b
+python main.py "Summarize the most important trends" --db path/to/data.db
+```
+
+If `--db` is omitted, the CLI creates its local fixture database from `db/sample_data.csv`. This fixture is not available in the dashboard or Docker image.
+
+### OpenRouter
+
+Set the provider and key in your shell, then run the same command:
+
+```bash
+export INSIGHTPILOT_LLM_PROVIDER=openrouter
+export OPENROUTER_API_KEY=your_key_here
+python main.py "Summarize the most important trends" --db path/to/data.db
+```
+
+CLI results are printed to the terminal and written to `dashboard/latest_run.json`.
 
 ## Configuration
 
-Everything is tuned for a modest local GPU (6 GB VRAM) by default, and configurable via environment variables:
+- `INSIGHTPILOT_LLM_PROVIDER`: `ollama` for the CLI default or `openrouter` for an environment-configured provider. The dashboard defaults to OpenRouter unless explicitly changed.
+- `INSIGHTPILOT_CODER_MODEL`: coding and SQL model. Defaults to `qwen2.5-coder:7b` for Ollama and `openai/gpt-4.1-mini` for environment-configured OpenRouter.
+- `INSIGHTPILOT_REASONING_MODEL`: planning, insight, and chart-selection model. Uses the same provider-specific defaults.
+- `OLLAMA_HOST`: Ollama endpoint. Defaults to `http://localhost:11434`.
+- `INSIGHTPILOT_NUM_CTX`: Ollama context size. Defaults to `4096`.
+- `INSIGHTPILOT_LLM_TIMEOUT`: model-call timeout in seconds. Defaults to `90`.
+- `INSIGHTPILOT_LLM_ATTEMPTS`: application-level model attempts. Defaults to `2`.
+- `INSIGHTPILOT_MAX_TOKENS`: OpenRouter output-token limit. Defaults to `2048`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `INSIGHTPILOT_CODER_MODEL` | `qwen2.5-coder:7b` | Model used for SQL generation |
-| `INSIGHTPILOT_REASONING_MODEL` | `qwen2.5-coder:7b` | Model used for planning, insights, chart selection |
-| `INSIGHTPILOT_NUM_CTX` | `4096` | Context window size passed to Ollama |
-| `INSIGHTPILOT_LLM_TIMEOUT` | `90` | Per-call timeout (seconds) |
-| `INSIGHTPILOT_LLM_ATTEMPTS` | `2` | Retry attempts per LLM call |
+## Upload and query boundaries
 
-To trade some quality for speed, point the reasoning model at something smaller without touching source code:
+- A single upload is limited to 100 MB.
+- A ZIP archive may contain one SQLite database or one or more UTF-8 CSV files, with at most 100 members.
+- Total expanded ZIP content is limited to 250 MB.
+- Archive paths are checked before extraction.
+- Generated SQL must be one read-only `SELECT` or `WITH` statement.
+- SQLite authorizer rules reject writes, attachment, and other unsafe operations.
+- Query execution is limited to 10 seconds and 1,000 returned rows.
+- The LLM receives at most the first 50 rows of each result for narrative findings.
+- Query validation retries each step at most three times.
+
+These controls reduce accidental or model-generated misuse. They are not a complete sandbox for hostile database files.
+
+## Tests
+
+The test suite does not require a live OpenRouter key or Ollama server.
 
 ```bash
-ollama pull qwen2.5:3b
-export INSIGHTPILOT_REASONING_MODEL=qwen2.5:3b
+python -m unittest discover -s tests -p "test_*.py" -v
+python -m tests.smoke_nodes
+python -m tests.smoke_llm_nodes
 ```
 
-LLM calls are synchronous and strictly sequential by design — this avoids concurrent VRAM contention on single-GPU local setups.
+GitHub Actions runs all three commands and performs a real Docker build for pushes and pull requests.
 
----
+## Deployment
+
+The repository supports two hosting paths:
+
+- **Current public app:** Streamlit Community Cloud.
+- **AWS production path:** GitHub Actions builds the image, pushes it to Amazon ECR, and deploys it to an EC2 instance through AWS Systems Manager. An HTTPS Application Load Balancer terminates TLS, and the EC2 instance has no inbound SSH rule.
+
+AWS deployment uses GitHub OIDC for short-lived credentials. It requires a VPC, two public subnets, an ACM certificate, the GitHub OIDC provider in IAM, and five GitHub Actions variables. See [DEPLOYMENT.md](DEPLOYMENT.md) for the CloudFormation command and complete setup procedure.
 
 ## Known limitations
 
-- The empty-result and negative-value validation checks are heuristics — a correct query with a genuinely empty or negative result can still trigger a (wasted) retry.
-- Schema inspection currently only reads structure, not sample values, which keeps prompts small but can make the query generator less precise on ambiguous column semantics (e.g. free-text categorical columns).
-- Everything assumes a single SQLite file; no multi-database joins.
+- The application analyzes one SQLite database per session and does not join across databases.
+- CSV imports store values as text; SQLite conversions in generated queries may be needed for numeric or date analysis.
+- Schema inspection intentionally avoids broad raw-data sampling, which can make ambiguous column meanings harder for the model to infer.
+- Empty-result and suspicious-negative-value checks are heuristics and can retry a valid query.
+- Session data and chat history are temporary and disappear when the session or container is removed.
+- OpenRouter free-model capacity, tool support, and rate limits can vary.
 
----
+## Technology
 
-## Tech stack
-
-**LangGraph** · **LangChain** (`langchain-community`, `langchain-ollama`) · **Ollama** (local LLM serving) · **Pydantic** (structured I/O validation) · **SQLite** · **Plotly** · **Pandas** · **Streamlit**
+LangGraph, LangChain, OpenRouter, Ollama, Streamlit, SQLite, Pydantic, Plotly, Pandas, Docker, GitHub Actions, Amazon ECR, Amazon EC2, AWS Systems Manager, AWS IAM, AWS Certificate Manager, and Elastic Load Balancing.
