@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -42,7 +42,7 @@ jobs:
           vars.EC2_INSTANCE_ID != '' &&
           vars.SSM_DEPLOY_DOCUMENT != '' }}
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     permissions:
       contents: read
