@@ -26,10 +26,29 @@ def profile_database(db_path: str | Path) -> dict:
             })
             for fk in connection.execute(f'PRAGMA foreign_key_list("{table}")').fetchall():
                 relationships.append({"from_table": table, "from_column": fk[3], "to_table": fk[2], "to_column": fk[4], "kind": "Declared foreign key"})
-    declared = {(item["from_table"], item["from_column"], item["to_table"], item["to_column"]) for item in relationships}
-    for index, left in enumerate(names):
-        for right in names[index + 1:]:
-            for column in sorted(table_columns[left] & table_columns[right]):
-                if (left, column, right, column) not in declared and (right, column, left, column) not in declared:
-                    relationships.append({"from_table": left, "from_column": column, "to_table": right, "to_column": column, "kind": "Inferred shared column"})
+        if "schema_relationships" in table_columns and {
+            "parent_table", "parent_key", "child_table", "child_key"
+        } <= table_columns["schema_relationships"]:
+            metadata_columns = table_columns["schema_relationships"]
+            relationship_column = "relationship" if "relationship" in metadata_columns else "NULL"
+            for parent, parent_key, child, child_key, cardinality in connection.execute(
+                f"SELECT parent_table, parent_key, child_table, child_key, {relationship_column} "
+                'FROM "schema_relationships"'
+            ):
+                parent = str(parent or "").removesuffix(".csv")
+                child = str(child or "").removesuffix(".csv")
+                if (parent in table_columns and child in table_columns
+                        and parent_key in table_columns[parent] and child_key in table_columns[child]):
+                    relationships.append({"from_table": parent, "from_column": parent_key,
+                                          "to_table": child, "to_column": child_key,
+                                          "kind": f"Provided {cardinality}" if cardinality else "Provided relationship"})
+    if not any(link["kind"].startswith("Provided") for link in relationships):
+        declared = {(item["from_table"], item["from_column"], item["to_table"], item["to_column"]) for item in relationships}
+        for index, left in enumerate(names):
+            for right in names[index + 1:]:
+                for column in sorted(table_columns[left] & table_columns[right]):
+                    if not column.endswith("_id"):
+                        continue
+                    if (left, column, right, column) not in declared and (right, column, left, column) not in declared:
+                        relationships.append({"from_table": left, "from_column": column, "to_table": right, "to_column": column, "kind": "Inferred shared identifier"})
     return {"tables": tables, "relationships": relationships}

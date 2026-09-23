@@ -211,10 +211,15 @@ def invoke_message(llm: Any, messages: Any) -> Any:
             if attempt < attempts:
                 time.sleep(1.0)
     kind = type(last_error).__name__
-    raise RuntimeError(
-        f"Model request failed after {attempts} attempts ({kind}). "
-        "Check the provider credentials, model availability, quota, and connection."
-    ) from None
+    if "timeout" in kind.lower():
+        message = (f"Model request timed out after {attempts} attempts. "
+                   "Try again later or increase INSIGHTPILOT_LLM_TIMEOUT.")
+    else:
+        message = (f"Model request failed after {attempts} attempts ({kind}). "
+                   "Check the provider credentials, model availability, quota, and connection.")
+    if active is not None:
+        active.failure = message  # Avoid repeating a failed hosted request for every graph step.
+    raise RuntimeError(message) from None
 
 
 def invoke_llm(llm: Any, prompt: str) -> str:

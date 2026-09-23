@@ -5,11 +5,13 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import llm
+from db.schema_profile import profile_database
 from nodes.query_executor import query_executor
 
 
@@ -91,6 +93,22 @@ class QueryBoundaryTests(unittest.TestCase):
             self.assertTrue(self.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n")["error"])
 
 
+class SchemaProfileTests(unittest.TestCase):
+    def test_supplied_relationships_override_shared_column_guessing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tables.db"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("CREATE TABLE products (product_id TEXT, unit_price TEXT)")
+                connection.execute("CREATE TABLE order_items (product_id TEXT, unit_price TEXT)")
+                connection.execute("CREATE TABLE schema_relationships (parent_table TEXT, parent_key TEXT, child_table TEXT, child_key TEXT, relationship TEXT)")
+                connection.execute("INSERT INTO schema_relationships VALUES ('products.csv', 'product_id', 'order_items.csv', 'product_id', '1-to-many')")
+                connection.commit()
+            links = profile_database(path)["relationships"]
+            self.assertEqual(links, [{"from_table": "products", "from_column": "product_id",
+                                      "to_table": "order_items", "to_column": "product_id",
+                                      "kind": "Provided 1-to-many"}])
+
+
 class DashboardTests(unittest.TestCase):
     def new_app(self):
         from streamlit.testing.v1 import AppTest
@@ -162,6 +180,22 @@ class DashboardTests(unittest.TestCase):
             app.button(key="remove_api_key").click().run()
             self.assertNotIn("model_settings", app.session_state)
 
+    def test_empty_overview_is_not_reported_as_success(self):
+        with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter"}), patch(
+            "main.run", return_value={"final_summary": "No validated query results were available for a narrative summary.", "results": [], "errors": ["Model timed out"]}
+        ):
+            app = self.new_app()
+            try:
+                self.configure(app, "visitor-key")
+                app.file_uploader[0].set_value(("data.csv", b"id,value\n1,10\n", "text/csv")).run()
+                app.button(key="load_data").click().run()
+                self.assertFalse(app.exception)
+                self.assertTrue(any("did not produce validated results" in item.value for item in app.warning))
+                self.assertFalse(any("analysis chat is ready" in item.value for item in app.success))
+            finally:
+                if "data_directory" in app.session_state:
+                    app.session_state["data_directory"].cleanup()
+
     def test_sessions_use_different_databases(self):
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "owner-key"}), patch("main.run", return_value={"final_summary": "Test overview"}) as run:
             apps = [self.new_app() for _ in range(2)]
@@ -186,6 +220,18 @@ class DashboardTests(unittest.TestCase):
 
 
 class SessionCredentialTests(unittest.TestCase):
+    def test_timeout_stops_subsequent_model_calls_without_exposing_details(self):
+        from unittest.mock import Mock
+        fake = Mock()
+        fake.invoke.side_effect = TimeoutError("private request data")
+        with patch.dict(os.environ, {"INSIGHTPILOT_LLM_ATTEMPTS": "1"}):
+            with llm.model_session(llm.NvidiaSettings(api_key="private-key")):
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, "timed out") as caught:
+                        llm.invoke_message(fake, "test")
+                    self.assertNotIn("private", str(caught.exception))
+        self.assertEqual(fake.invoke.call_count, 1)
+
     def test_nvidia_session_routes_to_nvidia_client(self):
         fake = SimpleNamespace(invoke=lambda _: SimpleNamespace(content="ok"))
         with patch("llm._nvidia_client", return_value=fake) as factory:

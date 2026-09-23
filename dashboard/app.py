@@ -228,7 +228,7 @@ def render_analysis(state: dict, expanded: bool = False) -> None:
 def render_schema(profile: dict) -> None:
     st.subheader("Database schema and connections")
     tables = profile["tables"]
-    st.caption(f"{len(tables)} table(s) loaded. Relationships labelled “inferred” use shared column names; they are not guaranteed foreign keys.")
+    st.caption(f"{len(tables)} table(s) loaded. Connections come from declared keys or supplied relationship metadata when available; inferred identifiers are only suggestions.")
     for table in tables:
         with st.expander(f"{table['name']} — {table['row_count']:,} rows"):
             st.dataframe(table["columns"], width="stretch", hide_index=True)
@@ -245,7 +245,7 @@ def render_schema(profile: dict) -> None:
         lines.append("}")
         st.graphviz_chart("\n".join(lines))
     else:
-        st.info("No declared or shared-column table relationships were detected.")
+        st.info("No declared, supplied, or inferred table relationships were detected.")
 
 
 st.set_page_config(page_title="InsightPilot", page_icon="✦", layout="wide")
@@ -328,7 +328,10 @@ if load_data:
                 overview = run(OVERVIEW_QUESTION, str(db_path), model_settings=model_settings)
             st.session_state.update({"active_db_path": str(db_path), "schema_profile": profile,
                                      "overview_state": overview, "chat_runs": []})
-            st.success(f"Loaded {Path(db_path).name}. The analysis chat is ready.")
+            if any(result.get("rows") and not result.get("error") for result in overview.get("results", [])):
+                st.success(f"Loaded {Path(db_path).name}. The analysis chat is ready.")
+            else:
+                st.warning("Data loaded, but the AI overview did not produce validated results. See Diagnostics below; you can retry or ask a shorter question in chat.")
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             st.error(f"Data loading could not run: {exc}")
 
