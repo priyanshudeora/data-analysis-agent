@@ -64,7 +64,7 @@ The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reaso
 ├── db/
 │   ├── schema_profile.py         # Dashboard schema and relationship profiling
 │   ├── setup_db.py               # Builds the local CLI/test fixture database
-│   └── sample_data.csv           # Local CLI/test fixture; excluded from Docker
+│   └── sample_data.csv           # Local CLI/test fixture
 ├── nodes/
 │   ├── planner.py                # Question → analysis plan
 │   ├── schema_inspector.py       # SQLite schema inspection for the graph
@@ -80,27 +80,20 @@ The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reaso
 │   ├── test_deployment.py        # Dashboard, credentials, and query-boundary tests
 │   ├── smoke_nodes.py            # Non-LLM graph-node smoke tests
 │   └── smoke_llm_nodes.py        # Mocked-LLM node smoke tests
-├── .github/workflows/
-│   └── aws-deploy.yml            # Test, Docker build, ECR push, and EC2 deployment
 ├── .streamlit/
 │   ├── config.toml               # Upload and Streamlit runtime settings
 │   └── secrets.toml.example      # Optional deployment configuration example
-├── infra/
-│   └── aws-ec2.yaml              # CloudFormation for ECR, EC2, ALB, IAM, and SSM
 ├── graph.py                       # LangGraph topology
 ├── state.py                       # Shared TypedDict and Pydantic state models
 ├── prompts.py                     # LLM prompts
 ├── llm.py                         # OpenRouter/Ollama clients and retry handling
 ├── main.py                        # Python API and CLI entrypoint
-├── Dockerfile                     # Non-root production container
-├── compose.yaml                   # Local container runtime
-├── requirements.txt               # Python dependencies
-└── DEPLOYMENT.md                  # Complete AWS deployment procedure
+└── requirements.txt               # Python dependencies
 ```
 
 ## Run the dashboard locally
 
-Python 3.10 or newer is required. CI and the production image use Python 3.13.
+Python 3.10 or newer is required.
 
 ```bash
 python -m venv .venv
@@ -117,22 +110,6 @@ On Windows PowerShell, activate the environment with:
 
 Open `http://localhost:8501`, enter your OpenRouter key in the UI, and upload a database or CSV file. No local secrets file is required for the default dashboard mode.
 
-## Run with Docker
-
-```bash
-docker compose up --build
-```
-
-Open `http://localhost:8501`. The container runs as a non-root user with a read-only root filesystem, dropped Linux capabilities, and a size-limited temporary filesystem for session uploads.
-
-Stop the service with:
-
-```bash
-docker compose down
-```
-
-The Docker build context excludes `db/sample_data.csv`, local secrets, virtual environments, generated databases, tests, and development artifacts.
-
 ## Run the CLI
 
 ### Ollama
@@ -144,7 +121,7 @@ ollama pull qwen2.5-coder:7b
 python main.py "Summarize the most important trends" --db path/to/data.db
 ```
 
-If `--db` is omitted, the CLI creates its local fixture database from `db/sample_data.csv`. This fixture is not available in the dashboard or Docker image.
+If `--db` is omitted, the CLI creates its local fixture database from `db/sample_data.csv`. This fixture is not available in the dashboard.
 
 ### OpenRouter
 
@@ -193,16 +170,9 @@ python -m tests.smoke_nodes
 python -m tests.smoke_llm_nodes
 ```
 
-GitHub Actions runs all three commands and performs a real Docker build for pushes and pull requests.
-
 ## Deployment
 
-The repository supports two hosting paths:
-
-- **Current public app:** Streamlit Community Cloud.
-- **AWS production path:** GitHub Actions builds the image, pushes it to Amazon ECR, and deploys it to an EC2 instance through AWS Systems Manager. An HTTPS Application Load Balancer terminates TLS, and the EC2 instance has no inbound SSH rule.
-
-AWS deployment uses GitHub OIDC for short-lived credentials. It requires a VPC, two public subnets, an ACM certificate, the GitHub OIDC provider in IAM, and five GitHub Actions variables. See [DEPLOYMENT.md](DEPLOYMENT.md) for the CloudFormation command and complete setup procedure.
+The public app runs on Streamlit Community Cloud. It starts from `dashboard/app.py` and installs dependencies from `requirements.txt`. Visitors provide their own OpenRouter key in the app. No dataset is preloaded in the dashboard.
 
 ## Known limitations
 
@@ -210,9 +180,9 @@ AWS deployment uses GitHub OIDC for short-lived credentials. It requires a VPC, 
 - CSV imports store values as text; SQLite conversions in generated queries may be needed for numeric or date analysis.
 - Schema inspection intentionally avoids broad raw-data sampling, which can make ambiguous column meanings harder for the model to infer.
 - Empty-result and suspicious-negative-value checks are heuristics and can retry a valid query.
-- Session data and chat history are temporary and disappear when the session or container is removed.
+- Session data and chat history are temporary and disappear when the session or Streamlit server is removed.
 - OpenRouter free-model capacity, tool support, and rate limits can vary.
 
 ## Technology
 
-LangGraph, LangChain, OpenRouter, Ollama, Streamlit, SQLite, Pydantic, Plotly, Pandas, Docker, GitHub Actions, Amazon ECR, Amazon EC2, AWS Systems Manager, AWS IAM, AWS Certificate Manager, and Elastic Load Balancing.
+LangGraph, LangChain, OpenRouter, Ollama, Streamlit, SQLite, Pydantic, Plotly, and Pandas.
