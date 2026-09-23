@@ -31,6 +31,19 @@ class ModelConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY"):
                 llm.validate_configuration()
 
+    def test_nvidia_configuration_and_tool_client(self):
+        from tools.chart_tools import CHART_TOOLS
+        with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "nvidia", "NVIDIA_API_KEY": "test-only"}):
+            client = llm._client("coder")
+            self.assertEqual(client.model_name, llm.NVIDIA_MODEL)
+            self.assertEqual(client.openai_api_base, llm.NVIDIA_BASE_URL)
+            self.assertEqual(client.max_retries, 0)
+            self.assertIsNotNone(client.bind_tools(CHART_TOOLS))
+        with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "nvidia", "NVIDIA_API_KEY": ""}):
+            llm._default_client.cache_clear()
+            with self.assertRaisesRegex(ValueError, "NVIDIA_API_KEY"):
+                llm.validate_configuration()
+
     def test_provider_error_does_not_expose_payload(self):
         fake = SimpleNamespace(invoke=lambda _: (_ for _ in ()).throw(ValueError("secret-key-and-private-data")))
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_ATTEMPTS": "1"}):
@@ -97,7 +110,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(app.text_input(key="openrouter_api_key").value, "")
             self.assertEqual(len(app.chat_input), 1)
             self.assertTrue(app.chat_input(key="chat_prompt").disabled)
-            self.assertIn("Add your OpenRouter API key", app.chat_input(key="chat_prompt").placeholder)
+            self.assertIn("Add your API key", app.chat_input(key="chat_prompt").placeholder)
 
     def test_apply_and_remove_key(self):
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "owner-key"}), patch("llm._openrouter_client") as client:
@@ -130,6 +143,25 @@ class DashboardTests(unittest.TestCase):
             self.configure(app, "visitor-key")
             self.assertEqual(app.session_state["model_settings"].model, "provider/tool-model")
 
+    def test_nvidia_key_uses_nvidia_settings_without_cross_provider_reuse(self):
+        with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter"}):
+            app = self.new_app()
+            self.configure(app, "openrouter-visitor")
+            app.selectbox(key="model_provider").select("NVIDIA Nemotron").run()
+            self.assertTrue(app.button(key="load_data").disabled)
+            self.assertIn("Add your API key", app.chat_input(key="chat_prompt").placeholder)
+            app.text_input(key="nvidia_api_key").set_value("nvidia-visitor")
+            next(button for button in app.button if button.label == "Use my key").click().run()
+            self.assertFalse(app.exception)
+            settings = app.session_state["model_settings"]
+            self.assertIsInstance(settings, llm.NvidiaSettings)
+            self.assertEqual(settings.api_key, "nvidia-visitor")
+            self.assertEqual(settings.model, llm.NVIDIA_MODEL)
+            self.assertEqual(app.text_input(key="nvidia_api_key").value, "")
+            self.assertNotIn("nvidia-visitor", repr(settings))
+            app.button(key="remove_api_key").click().run()
+            self.assertNotIn("model_settings", app.session_state)
+
     def test_sessions_use_different_databases(self):
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "owner-key"}), patch("main.run", return_value={"final_summary": "Test overview"}) as run:
             apps = [self.new_app() for _ in range(2)]
@@ -154,6 +186,15 @@ class DashboardTests(unittest.TestCase):
 
 
 class SessionCredentialTests(unittest.TestCase):
+    def test_nvidia_session_routes_to_nvidia_client(self):
+        fake = SimpleNamespace(invoke=lambda _: SimpleNamespace(content="ok"))
+        with patch("llm._nvidia_client", return_value=fake) as factory:
+            with llm.model_session(llm.NvidiaSettings(api_key="private-nvidia-key")):
+                self.assertEqual(llm.invoke_llm(llm.coder_llm, "test"), "ok")
+                self.assertEqual(llm.invoke_llm(llm.reasoning_llm, "test"), "ok")
+        factory.assert_called_once_with("private-nvidia-key", llm.NVIDIA_MODEL)
+        self.assertIsNone(llm._active_models.get())
+
     def test_parallel_runs_isolate_credentials(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier

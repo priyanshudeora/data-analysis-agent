@@ -10,10 +10,10 @@ from typing import Any
 
 from db.setup_db import DB_PATH, setup_database
 from graph import insight_graph
-from llm import OpenRouterSettings, model_session
+from llm import ModelSettings, model_session
 
 
-def run(question: str, db_path: str | None = None, *, model_settings: OpenRouterSettings | None = None) -> dict:
+def run(question: str, db_path: str | None = None, *, model_settings: ModelSettings | None = None) -> dict:
     path = Path(db_path) if db_path else setup_database()
     initial_state = {"question": question, "db_path": str(path), "queries": [], "results": [], "insights": [], "chart_specs": [], "errors": []}
     with model_session(model_settings):

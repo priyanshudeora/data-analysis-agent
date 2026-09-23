@@ -4,7 +4,7 @@ InsightPilot is a LangGraph-based data-analysis agent for SQLite and CSV data. I
 
 **Live app:** [insightpilot-data-analyst.streamlit.app](https://insightpilot-data-analyst.streamlit.app/)
 
-The hosted dashboard uses a bring-your-own-key model. Each visitor enters an OpenRouter API key in their own Streamlit session and can choose `openrouter/free` or a custom tool-capable model. The app does not use an owner API key or include a preloaded dataset.
+The hosted dashboard uses a bring-your-own-key model. Each visitor can use OpenRouter (`openrouter/free` or a custom tool-capable model) or NVIDIA's `nvidia/nemotron-3.5-lightning-30b-a3b`. The app does not use an owner API key or include a preloaded dataset.
 
 ## What the app does
 
@@ -40,20 +40,20 @@ The graph is assembled in `graph.py`. State moves between nodes through the `Age
 
 ## Model modes
 
-### Hosted dashboard: visitor-supplied OpenRouter key
+### Hosted dashboard: visitor-supplied model key
 
-The Streamlit dashboard defaults to OpenRouter mode. A visitor:
+The Streamlit dashboard defaults to OpenRouter. A visitor:
 
-1. Pastes an OpenRouter API key under **Your model**.
-2. Selects the free router or supplies a custom model ID.
+1. Chooses **OpenRouter** or **NVIDIA Nemotron** under **Your model** and pastes the matching API key.
+2. For OpenRouter, selects the free router or supplies a custom model ID. The NVIDIA option uses `nvidia/nemotron-3.5-lightning-30b-a3b` via `https://integrate.api.nvidia.com/v1`.
 3. Uploads a supported data file.
 4. Starts the automatic overview and uses the chat for follow-up questions.
 
-The key is stored only in that Streamlit session's server memory. It is not written to a file, environment variable, graph state, or saved result. Questions, schema information, sampled query results, and findings are sent to OpenRouter and the selected model provider.
+The key is stored only in that Streamlit session's server memory. It is not written to a file, environment variable, graph state, or saved result. Questions, schema information, sampled query results, and findings are sent to the selected provider. NVIDIA requires a valid NVIDIA API key and is subject to that account's limits.
 
-### Local CLI: Ollama or OpenRouter
+### Local CLI: Ollama, OpenRouter, or NVIDIA
 
-The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reasoning roles. It can also use an environment-configured OpenRouter key.
+The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reasoning roles. It can also use an environment-configured OpenRouter or NVIDIA key.
 
 ## Project structure
 
@@ -86,7 +86,7 @@ The CLI defaults to Ollama and uses `qwen2.5-coder:7b` for both coding and reaso
 ├── graph.py                       # LangGraph topology
 ├── state.py                       # Shared TypedDict and Pydantic state models
 ├── prompts.py                     # LLM prompts
-├── llm.py                         # OpenRouter/Ollama clients and retry handling
+├── llm.py                         # OpenRouter/NVIDIA/Ollama clients and retry handling
 ├── main.py                        # Python API and CLI entrypoint
 └── requirements.txt               # Python dependencies
 ```
@@ -108,7 +108,7 @@ On Windows PowerShell, activate the environment with:
 .\.venv\Scripts\Activate.ps1
 ```
 
-Open `http://localhost:8501`, enter your OpenRouter key in the UI, and upload a database or CSV file. No local secrets file is required for the default dashboard mode.
+Open `http://localhost:8501`, choose a provider, enter its API key in the UI, and upload a database or CSV file. No local secrets file is required for the default dashboard mode.
 
 ## Run the CLI
 
@@ -133,18 +133,28 @@ export OPENROUTER_API_KEY=your_key_here
 python main.py "Summarize the most important trends" --db path/to/data.db
 ```
 
+### NVIDIA Nemotron
+
+Set the provider and your NVIDIA API key in your shell. The CLI uses `nvidia/nemotron-3.5-lightning-30b-a3b` for both model roles by default:
+
+```bash
+export INSIGHTPILOT_LLM_PROVIDER=nvidia
+export NVIDIA_API_KEY=your_key_here
+python main.py "Summarize the most important trends" --db path/to/data.db
+```
+
 CLI results are printed to the terminal and written to `dashboard/latest_run.json`.
 
 ## Configuration
 
-- `INSIGHTPILOT_LLM_PROVIDER`: `ollama` for the CLI default or `openrouter` for an environment-configured provider. The dashboard defaults to OpenRouter unless explicitly changed.
-- `INSIGHTPILOT_CODER_MODEL`: coding and SQL model. Defaults to `qwen2.5-coder:7b` for Ollama and `openai/gpt-4.1-mini` for environment-configured OpenRouter.
+- `INSIGHTPILOT_LLM_PROVIDER`: `ollama` for the CLI default, `openrouter`, or `nvidia`. The dashboard offers OpenRouter and NVIDIA to visitors; `ollama` remains an owner-configured local option.
+- `INSIGHTPILOT_CODER_MODEL`: coding and SQL model. Defaults to `qwen2.5-coder:7b` for Ollama, `openai/gpt-4.1-mini` for environment-configured OpenRouter, and `nvidia/nemotron-3.5-lightning-30b-a3b` for NVIDIA.
 - `INSIGHTPILOT_REASONING_MODEL`: planning, insight, and chart-selection model. Uses the same provider-specific defaults.
 - `OLLAMA_HOST`: Ollama endpoint. Defaults to `http://localhost:11434`.
 - `INSIGHTPILOT_NUM_CTX`: Ollama context size. Defaults to `4096`.
 - `INSIGHTPILOT_LLM_TIMEOUT`: model-call timeout in seconds. Defaults to `90`.
 - `INSIGHTPILOT_LLM_ATTEMPTS`: application-level model attempts. Defaults to `2`.
-- `INSIGHTPILOT_MAX_TOKENS`: OpenRouter output-token limit. Defaults to `2048`.
+- `INSIGHTPILOT_MAX_TOKENS`: hosted-model output-token limit. Defaults to `2048`.
 
 ## Upload and query boundaries
 
@@ -162,7 +172,7 @@ These controls reduce accidental or model-generated misuse. They are not a compl
 
 ## Tests
 
-The test suite does not require a live OpenRouter key or Ollama server.
+The test suite does not require a live model key or Ollama server.
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
@@ -172,7 +182,7 @@ python -m tests.smoke_llm_nodes
 
 ## Deployment
 
-The public app runs on Streamlit Community Cloud. It starts from `dashboard/app.py` and installs dependencies from `requirements.txt`. Visitors provide their own OpenRouter key in the app. No dataset is preloaded in the dashboard.
+The public app runs on Streamlit Community Cloud. It starts from `dashboard/app.py` and installs dependencies from `requirements.txt`. Visitors provide their own OpenRouter or NVIDIA key in the app. No dataset is preloaded in the dashboard.
 
 ## Known limitations
 
@@ -181,8 +191,8 @@ The public app runs on Streamlit Community Cloud. It starts from `dashboard/app.
 - Schema inspection intentionally avoids broad raw-data sampling, which can make ambiguous column meanings harder for the model to infer.
 - Empty-result and suspicious-negative-value checks are heuristics and can retry a valid query.
 - Session data and chat history are temporary and disappear when the session or Streamlit server is removed.
-- OpenRouter free-model capacity, tool support, and rate limits can vary.
+- Hosted-model capacity, tool support, pricing, and rate limits can vary by provider and account.
 
 ## Technology
 
-LangGraph, LangChain, OpenRouter, Ollama, Streamlit, SQLite, Pydantic, Plotly, and Pandas.
+LangGraph, LangChain, OpenRouter, NVIDIA API, Ollama, Streamlit, SQLite, Pydantic, Plotly, and Pandas.

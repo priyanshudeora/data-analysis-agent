@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 from db.schema_profile import profile_database
 from main import run
-from llm import OpenRouterSettings, validate_configuration
+from llm import NvidiaSettings, OpenRouterSettings, validate_configuration
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_UNZIPPED_BYTES = 250 * 1024 * 1024
@@ -37,15 +37,21 @@ OVERVIEW_QUESTION = (
 def apply_model_settings() -> None:
     """Callback: update only this session; never put visitor keys in os.environ."""
     previous = st.session_state.get("model_settings")
-    key = st.session_state.get("openrouter_api_key", "").strip()
-    if not key and previous:
+    use_nvidia = st.session_state.get("model_provider") == "NVIDIA Nemotron"
+    key_name = "nvidia_api_key" if use_nvidia else "openrouter_api_key"
+    key = st.session_state.get(key_name, "").strip()
+    if not key and isinstance(previous, NvidiaSettings if use_nvidia else OpenRouterSettings):
         key = previous.api_key
-    model = ("openrouter/free" if st.session_state.get("model_choice") == "Free models"
-             else st.session_state.get("custom_model", ""))
     try:
-        st.session_state["model_settings"] = OpenRouterSettings(api_key=key, model=model)
+        if use_nvidia:
+            settings = NvidiaSettings(api_key=key)
+        else:
+            model = ("openrouter/free" if st.session_state.get("model_choice") == "Free models"
+                     else st.session_state.get("custom_model", ""))
+            settings = OpenRouterSettings(api_key=key, model=model)
+        st.session_state["model_settings"] = settings
         st.session_state.pop("model_error", None)
-        st.session_state["openrouter_api_key"] = ""
+        st.session_state[key_name] = ""
     except ValueError as exc:
         st.session_state.pop("model_settings", None)
         st.session_state["model_error"] = str(exc)
@@ -55,6 +61,7 @@ def remove_api_key() -> None:
     st.session_state.pop("model_settings", None)
     st.session_state.pop("model_error", None)
     st.session_state["openrouter_api_key"] = ""
+    st.session_state["nvidia_api_key"] = ""
 
 
 def session_directory() -> Path:
@@ -263,28 +270,39 @@ if dashboard_provider == "ollama":
     st.caption("Using the local Ollama model configured by the app owner.")
 else:
     st.subheader("Your model")
-    st.caption("Use your own OpenRouter key. All model usage belongs to your account; the app owner's credits are never used.")
-    st.selectbox("Model option", ["Free models", "Custom model"], key="model_choice")
+    st.caption("Use your own API key. Model usage belongs to your account.")
+    st.selectbox("Model provider", ["OpenRouter", "NVIDIA Nemotron"], key="model_provider")
+    use_nvidia = st.session_state["model_provider"] == "NVIDIA Nemotron"
+    if not use_nvidia:
+        st.selectbox("Model option", ["Free models", "Custom model"], key="model_choice")
     with st.form("model_credentials"):
-        st.text_input("OpenRouter API key", type="password", key="openrouter_api_key",
-                      placeholder="Paste your key, or leave blank to keep your current key")
-        if st.session_state["model_choice"] == "Custom model":
-            st.text_input("OpenRouter model ID", key="custom_model", placeholder="provider/model-name")
-            st.caption("Choose a model with tool-calling support. Paid models charge your OpenRouter account.")
+        if use_nvidia:
+            st.text_input("NVIDIA API key", type="password", key="nvidia_api_key",
+                          placeholder="Paste your key, or leave blank to keep your current key")
+            st.caption("Uses nvidia/nemotron-3.5-lightning-30b-a3b through NVIDIA's hosted API. Your account's limits apply.")
         else:
-            st.caption("Uses openrouter/free. Free models have rate limits and availability can vary.")
+            st.text_input("OpenRouter API key", type="password", key="openrouter_api_key",
+                          placeholder="Paste your key, or leave blank to keep your current key")
+            if st.session_state["model_choice"] == "Custom model":
+                st.text_input("OpenRouter model ID", key="custom_model", placeholder="provider/model-name")
+                st.caption("Choose a model with tool-calling support. Paid models charge your OpenRouter account.")
+            else:
+                st.caption("Uses openrouter/free. Free models have rate limits and availability can vary.")
         st.form_submit_button("Use my key", on_click=apply_model_settings, type="primary")
     if st.session_state.get("model_error"):
         st.error(st.session_state["model_error"])
     model_settings = st.session_state.get("model_settings")
-    model_ready = model_settings is not None
+    model_ready = isinstance(model_settings, NvidiaSettings if use_nvidia else OpenRouterSettings)
     if model_ready:
         st.success(f"Ready to use {model_settings.model}. Your key is checked when you start an analysis.")
         st.button("Remove my key", key="remove_api_key", on_click=remove_api_key)
     else:
         st.info("Add your API key above to start an analysis.")
-    st.caption("Your key is held in this browser session's server memory, never saved to a file. Remove it when finished. Questions, schema, result samples, and findings are sent through OpenRouter to the model provider.")
-    st.markdown("[Get an OpenRouter key](https://openrouter.ai/settings/keys) · [Free model details](https://openrouter.ai/openrouter/free)")
+    st.caption("Your key is held in this browser session's server memory, never saved to a file. Remove it when finished. Questions, schema, result samples, and findings are sent to the selected model provider.")
+    if use_nvidia:
+        st.markdown("[Get a NVIDIA API key](https://build.nvidia.com/nvidia/nemotron-3.5-lightning-30b-a3b)")
+    else:
+        st.markdown("[Get an OpenRouter key](https://openrouter.ai/settings/keys) · [Free model details](https://openrouter.ai/openrouter/free)")
 
 st.subheader("1. Load and profile your data")
 uploaded_db = st.file_uploader("SQLite database, CSV, or ZIP", type=["db", "sqlite", "sqlite3", "csv", "zip"])
@@ -324,7 +342,7 @@ else:
 
 st.subheader("2. Ask InsightPilot")
 if not model_ready:
-    st.info("Add your OpenRouter API key above to enable chat.")
+    st.info("Add your API key above to enable chat.")
 elif not data_ready:
     st.info("Load and profile a dataset above to enable chat.")
 else:
@@ -338,7 +356,7 @@ for item in st.session_state.get("chat_runs", []):
 
 chat_disabled = not (model_ready and data_ready)
 if not model_ready:
-    chat_placeholder = "Add your OpenRouter API key to start chatting"
+    chat_placeholder = "Add your API key to start chatting"
 elif not data_ready:
     chat_placeholder = "Load a dataset to start chatting"
 else:
