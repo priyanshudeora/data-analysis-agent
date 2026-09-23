@@ -76,9 +76,9 @@ State is passed between nodes as a single `AgentState` (TypedDict), with Pydanti
 ├── tools/
 │   └── chart_tools.py         # The 4 strict Plotly chart tools + ContextVar-scoped data binding
 ├── db/
-│   ├── setup_db.py            # Builds the bundled demo SQLite DB from sample_data.csv
+│   ├── setup_db.py            # Builds a local CLI/test fixture from sample_data.csv
 │   ├── schema_profile.py      # Table/relationship profiling for the dashboard's schema view
-│   └── sample_data.csv        # Bundled "tech layoffs" demo dataset
+│   └── sample_data.csv        # Local CLI/test fixture; excluded from the Docker image
 ├── dashboard/
 │   └── app.py                  # Streamlit UI: upload data, view schema, chat with InsightPilot
 ├── tests/
@@ -131,11 +131,11 @@ CLI runs write their state to `dashboard/latest_run.json`. The dashboard runs an
 
 ## Using the dashboard
 
-1. **Load data** — use the bundled tech-layoffs demo database, or upload your own `.db` / `.sqlite` / `.sqlite3` file, a `.csv`, or a `.zip` containing exactly one SQLite database or one-or-more UTF-8 CSV files. CSV uploads are converted into a temporary SQLite database (one table per file, safely-sanitized table/column names). Uploads are checked for valid SQLite headers, unsafe archive paths, too many files, and oversized archives before anything is written to disk.
+1. **Load data** — upload your own `.db` / `.sqlite` / `.sqlite3` file, a `.csv`, or a `.zip` containing exactly one SQLite database or one-or-more UTF-8 CSV files. CSV uploads are converted into a temporary SQLite database (one table per file, safely-sanitized table/column names). Uploads are checked for valid SQLite headers, unsafe archive paths, too many files, and oversized archives before anything is written to disk.
 2. **Automatic overview** — as soon as data loads, InsightPilot profiles the schema (tables, columns, inferred relationships) and runs one full analysis pass to give you a starting overview.
 3. **Ask follow-up questions** — the chat box at the bottom runs the complete plan → SQL → validate → insight → chart pipeline against the loaded database for any question you type.
 
-Dashboard uploads and demo databases are stored in separate temporary directories per session. They are not durable across restarts.
+Dashboard uploads are stored in separate temporary directories per session. They are not durable across restarts. The Docker image contains no bundled dataset.
 
 ### Example questions
 
