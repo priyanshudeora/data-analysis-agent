@@ -103,7 +103,8 @@ class DashboardTests(unittest.TestCase):
         with patch.dict(os.environ, {"INSIGHTPILOT_LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "owner-key"}), patch("llm._openrouter_client") as client:
             app = self.new_app()
             self.configure(app, "visitor-key")
-            self.assertEqual(app.segmented_control(key="data_source").value, "Upload my data")
+            self.assertEqual(len(app.segmented_control), 0)
+            self.assertEqual(len(app.file_uploader), 1)
             self.assertTrue(app.button(key="load_data").disabled)
             self.assertTrue(app.chat_input(key="chat_prompt").disabled)
             self.assertIn("Load a dataset", app.chat_input(key="chat_prompt").placeholder)
@@ -135,7 +136,8 @@ class DashboardTests(unittest.TestCase):
             try:
                 for index, app in enumerate(apps):
                     self.configure(app, f"visitor-{index}")
-                    app.segmented_control(key="data_source").select("Bundled tech-layoffs demo").run()
+                    csv_data = f"name,value\nsession-{index},{index}\n".encode()
+                    app.file_uploader[0].set_value((f"session-{index}.csv", csv_data, "text/csv")).run()
                     self.assertFalse(app.button(key="load_data").disabled)
                     app.button(key="load_data").click().run()
                     self.assertFalse(app.exception)

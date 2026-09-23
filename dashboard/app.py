@@ -22,7 +22,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from db.setup_db import setup_database
 from db.schema_profile import profile_database
 from main import run
 from llm import OpenRouterSettings, validate_configuration
@@ -288,33 +287,24 @@ else:
     st.markdown("[Get an OpenRouter key](https://openrouter.ai/settings/keys) · [Free model details](https://openrouter.ai/openrouter/free)")
 
 st.subheader("1. Load and profile your data")
-data_source = st.segmented_control(
-    "Database source",
-    ["Upload my data", "Bundled tech-layoffs demo"],
-    default="Upload my data",
-    key="data_source",
-)
-uploaded_db = None
-if data_source == "Upload my data":
-    uploaded_db = st.file_uploader("SQLite database, CSV, or ZIP", type=["db", "sqlite", "sqlite3", "csv", "zip"])
-upload_missing = data_source == "Upload my data" and uploaded_db is None
+uploaded_db = st.file_uploader("SQLite database, CSV, or ZIP", type=["db", "sqlite", "sqlite3", "csv", "zip"])
 load_data = st.button(
     "Load data and generate overview",
     type="primary",
     width="stretch",
     key="load_data",
-    disabled=not model_ready or upload_missing,
+    disabled=not model_ready or uploaded_db is None,
 )
 
 if load_data:
     if not model_ready:
         st.error("Add your own API key before starting an analysis.")
         st.stop()
-    if data_source == "Upload my data" and not uploaded_db:
+    if not uploaded_db:
         st.error("Upload a database, CSV, or ZIP file first.")
     else:
         try:
-            db_path = save_uploaded_database(uploaded_db) if uploaded_db else setup_database(session_directory() / "demo.db")
+            db_path = save_uploaded_database(uploaded_db)
             with st.spinner("Inspecting schema, mapping connections, and generating the complete data overview..."):
                 profile = profile_database(db_path)
                 overview = run(OVERVIEW_QUESTION, str(db_path), model_settings=model_settings)
@@ -330,7 +320,7 @@ if data_ready:
     st.subheader("Automatic data overview")
     render_analysis(st.session_state["overview_state"], expanded=False)
 else:
-    st.info("Choose your data source and click **Load data and generate overview**. You can see the chat below; it becomes available after data is loaded.")
+    st.info("Upload a SQLite database, CSV, or ZIP file, then click **Load data and generate overview**. You can see the chat below; it becomes available after data is loaded.")
 
 st.subheader("2. Ask InsightPilot")
 if not model_ready:
